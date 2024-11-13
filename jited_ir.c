@@ -67,8 +67,6 @@ static inline decode_t decode_at_address(const Instr_t* prog, uint32_t addr) {
 }
 
 /*** Service routines ***/
-#define BAIL_ON_ERROR() if (cpu.state != Cpu_Running) break;
-
 static void jit_push(ir_ctx *ctx, ir_ref cpu, ir_ref *stack_overflow, ir_ref v) {
     // JIT: if (pcpu->sp >= STACK_CAPACITY-1) {
     ir_ref sp_addr = ir_ADD_OFFSET(cpu, offsetof(cpu_t, sp));
@@ -140,11 +138,11 @@ static void jit_program(ir_ctx *ctx, const Instr_t *prog, int len) {
     ir_ref stack_underflow = IR_UNUSED;
     ir_ref stack_bound = IR_UNUSED;
     jit_label *labels = calloc(len, sizeof(jit_label));
+    decode_t decoded;
 
     /* mark goto targets */
     for (int i=0; i < len;) {
-        decode_t decoded = decode_at_address(prog, i);
-
+        decoded = decode_at_address(prog, i);
         i += decoded.length;
         switch(decoded.opcode) {
         case Instr_JE:
@@ -165,10 +163,14 @@ static void jit_program(ir_ctx *ctx, const Instr_t *prog, int len) {
     ir_ref sqrt_func =
         ir_const_func(ctx, ir_str(ctx, "sqrt"), ir_proto_1(ctx, IR_DOUBLE, IR_BUILTIN_FUNC, IR_DOUBLE));
 
-    for (int i=0; i < len;) {
-        decode_t decoded = decode_at_address(prog, i);
+    decoded.opcode = Instr_Nop;
 
+    for (int i=0; i < len;) {
         if (labels[i].inputs > 0) {
+            if (decoded.opcode != Instr_Jump) {
+                labels[i].inputs++;
+                jit_goto_forward(ctx, &labels[i]);
+            }
             assert(!ctx->control);
             if (labels[i].inputs == 1) {
                 tmp1 = ir_emit1(ctx, IR_BEGIN, IR_UNUSED);
@@ -192,6 +194,7 @@ static void jit_program(ir_ctx *ctx, const Instr_t *prog, int len) {
             labels[i].inputs = tmp2;
         }
 
+        decoded = decode_at_address(prog, i);
         i += decoded.length;
 
         switch(decoded.opcode) {
@@ -360,10 +363,6 @@ static void jit_program(ir_ctx *ctx, const Instr_t *prog, int len) {
         default:
             assert(0 && "Unsupported instruction");
             break;
-        }
-        if (i < len && labels[i].inputs > 0 && decoded.opcode != Instr_Jump) {
-            labels[i].inputs++;
-            jit_goto_forward(ctx, &labels[i]);
         }
     }
 
