@@ -6,10 +6,11 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <stddef.h>
+#include <string.h>
 
 #include "common.h"
 
-#include <stddef.h>
 #include "ir.h"
 #include "ir_builder.h"
 
@@ -73,14 +74,16 @@ typedef struct _jit_label {
 } jit_label;
 
 typedef struct _jit_ctx {
-	ir_ctx ctx;
-	ir_ref cpu;
+	ir_ctx     ctx;
+	ir_ref     cpu;
 #ifdef JIT_RESOLVE_STACK
-    int    sp;
+    int        sp;
+    int       *bb_sp; /* SP value at start of basic-block */
 #endif
-    ir_ref stack_overflow;
-    ir_ref stack_underflow;
-    ir_ref stack_bound;
+    jit_label *labels;
+    ir_ref     stack_overflow;
+    ir_ref     stack_underflow;
+    ir_ref     stack_bound;
 } jit_ctx;
 
 #undef  _ir_CTX
@@ -165,18 +168,41 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 #endif
 }
 
-static void jit_goto_backward(jit_ctx *jit, jit_label *label) {
-    ir_set_op(_ir_CTX, label->merge, ++label->inputs, ir_END());
+static void jit_goto_backward(jit_ctx *jit, uint32_t target) {
+    ir_set_op(_ir_CTX, jit->labels[target].merge, ++jit->labels[target].inputs, ir_END());
+#ifdef JIT_RESOLVE_STACK
+    assert(jit->bb_sp[target] == -1 || jit->bb_sp[target] == jit->sp);
+    jit->bb_sp[target] = jit->sp;
+#endif
 }
 
-static void jit_goto_forward(jit_ctx *jit, jit_label *label) {
-    ir_END_list(label->merge);
+static void jit_goto_forward(jit_ctx *jit, uint32_t target) {
+    ir_END_list(jit->labels[target].merge);
+#ifdef JIT_RESOLVE_STACK
+    assert(jit->bb_sp[target] == -1 || jit->bb_sp[target] == jit->sp);
+    jit->bb_sp[target] = jit->sp;
+#endif
 }
 
 static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     assert(prog);
-    jit_label *labels = calloc(len, sizeof(jit_label));
     decode_t decoded;
+    ir_ref tmp1, tmp2, tmp3;
+
+    ir_START();
+    jit->cpu = ir_PARAM(IR_ADDR, "cpu", 1);
+
+#ifdef JIT_RESOLVE_STACK
+    jit->sp = 0;
+    jit->bb_sp = malloc(len * sizeof(int));
+    memset(jit->bb_sp, -1, len * sizeof(int));
+#endif
+
+    jit->labels = calloc(len, sizeof(jit_label));
+    jit->stack_overflow = IR_UNUSED;
+    jit->stack_underflow = IR_UNUSED;
+    jit->stack_bound = IR_UNUSED;
+
 
     /* mark goto targets */
     for (int i=0; i < len;) {
@@ -186,21 +212,10 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
         case Instr_JE:
         case Instr_JNE:
         case Instr_Jump:
-            labels[i + decoded.immediate].inputs++;
+            jit->labels[i + decoded.immediate].inputs++;
             break;
         }
     }
-
-    ir_START();
-    ir_ref tmp1, tmp2, tmp3;
-
-    jit->cpu = ir_PARAM(IR_ADDR, "cpu", 1);
-#ifdef JIT_RESOLVE_STACK
-    jit->sp = 0;
-#endif
-    jit->stack_overflow = IR_UNUSED;
-    jit->stack_underflow = IR_UNUSED;
-    jit->stack_bound = IR_UNUSED;
 
     ir_ref printf_func =
         ir_const_func(_ir_CTX, ir_str(_ir_CTX, "printf"), ir_proto_1(_ir_CTX, IR_I32, IR_VARARG_FUNC, IR_ADDR));
@@ -212,32 +227,36 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     decoded.opcode = Instr_Nop;
 
     for (int i=0; i < len;) {
-        if (labels[i].inputs > 0) {
+        if (jit->labels[i].inputs > 0) {
             if (decoded.opcode != Instr_Jump) {
-                labels[i].inputs++;
-                jit_goto_forward(jit, &labels[i]);
+                jit->labels[i].inputs++;
+                jit_goto_forward(jit, i);
             }
+#ifdef JIT_RESOLVE_STACK
+            assert(jit->bb_sp[i] != -1);
+            jit->sp == jit->bb_sp[i];
+#endif
             assert(!jit->ctx.control);
-            if (labels[i].inputs == 1) {
+            if (jit->labels[i].inputs == 1) {
                 tmp1 = ir_emit1(_ir_CTX, IR_BEGIN, IR_UNUSED);
             } else {
-                tmp1 = ir_emit_N(_ir_CTX, IR_MERGE, labels[i].inputs);
+                tmp1 = ir_emit_N(_ir_CTX, IR_MERGE, jit->labels[i].inputs);
             }
             tmp2 = 0;
-            tmp3 = labels[i].merge;
-            labels[i].merge = jit->ctx.control = tmp1;
+            tmp3 = jit->labels[i].merge;
+            jit->labels[i].merge = jit->ctx.control = tmp1;
 
             while (tmp3) {
                 /* Store forward GOTOs into MERGE */
                 tmp2++;
-                assert(tmp2 <= labels[i].inputs);
+                assert(tmp2 <= jit->labels[i].inputs);
                 ir_set_op(_ir_CTX, tmp1, tmp2, tmp3);
                 ir_insn *insn = &jit->ctx.ir_base[tmp3];
                 assert(insn->op == IR_END);
                 tmp3 = insn->op2;
                 insn->op2 = IR_UNUSED;
             }
-            labels[i].inputs = tmp2;
+            jit->labels[i].inputs = tmp2;
         }
 
         decoded = decode_at_address(prog, i);
@@ -329,9 +348,9 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             tmp3 = ir_IF(ir_EQ(tmp1, ir_CONST_U32(0)));
             ir_IF_TRUE(tmp3);
             if (decoded.immediate >= 0) {
-                jit_goto_forward(jit, &labels[i + decoded.immediate]);
+                jit_goto_forward(jit, i + decoded.immediate);
             } else {
-                jit_goto_backward(jit, &labels[i + decoded.immediate]);
+                jit_goto_backward(jit, i + decoded.immediate);
             }
             ir_IF_FALSE(tmp3);
             break;
@@ -341,17 +360,17 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             tmp3 = ir_IF(ir_NE(tmp1, ir_CONST_U32(0)));
             ir_IF_TRUE(tmp3);
             if (decoded.immediate >= 0) {
-                jit_goto_forward(jit, &labels[i + decoded.immediate]);
+                jit_goto_forward(jit, i + decoded.immediate);
             } else {
-                jit_goto_backward(jit, &labels[i + decoded.immediate]);
+                jit_goto_backward(jit, i + decoded.immediate);
             }
             ir_IF_FALSE(tmp3);
             break;
         case Instr_Jump:
             if (decoded.immediate >= 0) {
-                jit_goto_forward(jit, &labels[i + decoded.immediate]);
+                jit_goto_forward(jit, i + decoded.immediate);
             } else {
-                jit_goto_backward(jit, &labels[i + decoded.immediate]);
+                jit_goto_backward(jit, i + decoded.immediate);
             }
             break;
         case Instr_And:
