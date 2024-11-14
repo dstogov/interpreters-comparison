@@ -116,7 +116,7 @@ static ir_ref jit_pop(jit_ctx *jit) {
     assert(jit->sp >= 0);
     int sp = jit->sp--;
     //JIT: pcpu->stack[pcpu->sp--];
-    return ir_LOAD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)));
+    return ir_LOAD_U32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)));
 #else
     // JIT: if (pcpu->sp < 0) {
     ir_ref sp_addr = ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp));
@@ -129,7 +129,7 @@ static ir_ref jit_pop(jit_ctx *jit) {
     ir_IF_FALSE(if_underflow);
 
     //JIT: pcpu->stack[pcpu->sp--];
-    ir_ref ret = ir_LOAD_I32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
+    ir_ref ret = ir_LOAD_U32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(sp, ir_CONST_I32(sizeof(uint32_t)))));
     sp = ir_SUB_I32(sp, ir_CONST_I32(1));
     ir_STORE(sp_addr, sp);
@@ -148,7 +148,7 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 
     ir_IF_FALSE(if_out);
     // JIT: pcpu->stack[pcpu->sp - pos];
-    return ir_LOAD_I32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
+    return ir_LOAD_U32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(ir_SUB_I32(ir_CONST_U32(jit->sp), pos), ir_CONST_I32(sizeof(uint32_t)))));
 #else
     // JIT: if (pcpu->sp - 1 < pos) {
@@ -160,7 +160,7 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 
     ir_IF_FALSE(if_out);
     // JIT: pcpu->stack[pcpu->sp - pos];
-    return ir_LOAD_I32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
+    return ir_LOAD_U32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(ir_SUB_I32(sp, pos), ir_CONST_I32(sizeof(uint32_t)))));
 #endif
 }
