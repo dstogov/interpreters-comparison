@@ -124,7 +124,7 @@ jited_ir_stack: jited_ir_stack.o
 	$(CC) $^ -lir -lcapstone -lm -o $@
 
 jited_ir_var.o: jited_ir.c
-	$(CC) $(DEPFLAGS) $(CFLAGS) $(CPPFLAGS) -DJIT_RESOLVE_STACK -DJIT_USE_VARS -O0 -g -o $@ -c $<
+	$(CC) $(DEPFLAGS) $(CFLAGS) $(CPPFLAGS) -DJIT_RESOLVE_STACK -DJIT_USE_VARS -o $@ -c $<
 
 jited_ir_var: jited_ir_var.o
 	$(CC) $^ -lir -lcapstone -lm -o $@
