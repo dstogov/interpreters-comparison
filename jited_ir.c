@@ -75,6 +75,9 @@ typedef struct _jit_label {
 typedef struct _jit_ctx {
 	ir_ctx ctx;
 	ir_ref cpu;
+#ifdef JIT_RESOLVE_STACK
+    int    sp;
+#endif
     ir_ref stack_overflow;
     ir_ref stack_underflow;
     ir_ref stack_bound;
@@ -84,6 +87,12 @@ typedef struct _jit_ctx {
 #define _ir_CTX    (&jit->ctx)
 
 static void jit_push(jit_ctx *jit, ir_ref v) {
+#ifdef JIT_RESOLVE_STACK
+    assert(jit->sp < STACK_CAPACITY - 1);
+    int sp = ++jit->sp;
+    // JIT: pcpu->stack[++pcpu->sp] = v;
+    ir_STORE(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)), v);
+#else
     // JIT: if (pcpu->sp >= STACK_CAPACITY-1) {
     ir_ref sp_addr = ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp));
     ir_ref sp = ir_LOAD_I32(sp_addr);
@@ -99,9 +108,16 @@ static void jit_push(jit_ctx *jit, ir_ref v) {
     ir_STORE(sp_addr, sp);
     ir_STORE(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(sp, ir_CONST_I32(sizeof(uint32_t)))), v);
+#endif
 }
 
 static ir_ref jit_pop(jit_ctx *jit) {
+#ifdef JIT_RESOLVE_STACK
+    assert(jit->sp >= 0);
+    int sp = jit->sp--;
+    //JIT: pcpu->stack[pcpu->sp--];
+    return ir_LOAD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)));
+#else
     // JIT: if (pcpu->sp < 0) {
     ir_ref sp_addr = ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp));
     ir_ref sp = ir_LOAD_I32(sp_addr);
@@ -119,9 +135,22 @@ static ir_ref jit_pop(jit_ctx *jit) {
     ir_STORE(sp_addr, sp);
 
     return ret;
+#endif
 }
 
 static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
+#ifdef JIT_RESOLVE_STACK
+    // JIT: if (pcpu->sp - 1 < pos) {
+    ir_ref if_out = ir_IF(ir_LT(ir_CONST_U32(jit->sp - 1), pos));
+
+    ir_IF_TRUE_cold(if_out);
+    ir_END_list(jit->stack_bound);
+
+    ir_IF_FALSE(if_out);
+    // JIT: pcpu->stack[pcpu->sp - pos];
+    return ir_LOAD_I32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
+            ir_MUL_I32(ir_SUB_I32(ir_CONST_U32(jit->sp), pos), ir_CONST_I32(sizeof(uint32_t)))));
+#else
     // JIT: if (pcpu->sp - 1 < pos) {
     ir_ref sp = ir_LOAD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp)));
     ir_ref if_out = ir_IF(ir_LT(ir_SUB_U32(sp, ir_CONST_U32(1)), pos));
@@ -133,6 +162,7 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
     // JIT: pcpu->stack[pcpu->sp - pos];
     return ir_LOAD_I32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(ir_SUB_I32(sp, pos), ir_CONST_I32(sizeof(uint32_t)))));
+#endif
 }
 
 static void jit_goto_backward(jit_ctx *jit, jit_label *label) {
@@ -165,6 +195,9 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     ir_ref tmp1, tmp2, tmp3;
 
     jit->cpu = ir_PARAM(IR_ADDR, "cpu", 1);
+#ifdef JIT_RESOLVE_STACK
+    jit->sp = 0;
+#endif
     jit->stack_overflow = IR_UNUSED;
     jit->stack_underflow = IR_UNUSED;
     jit->stack_bound = IR_UNUSED;

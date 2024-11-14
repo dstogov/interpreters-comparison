@@ -10,7 +10,7 @@ COMMON_SRC = common.c
 COMMON_OBJ := $(COMMON_SRC:.c=.o)
 COMMON_HEADERS = common.h
 
-ALL = switched threaded predecoded subroutined threaded-cached tailrecursive asmopt translated native jited_ir
+ALL = switched threaded predecoded subroutined threaded-cached tailrecursive asmopt translated native jited_ir jited_ir_stack
 
 # Must be the first target for the magic below to work
 all: $(ALL)
@@ -115,4 +115,10 @@ jited_ir.o: jited_ir.c
 	$(CC) $(DEPFLAGS) $(CFLAGS) $(CPPFLAGS) -c $<
 
 jited_ir: jited_ir.o
+	$(CC) $^ -lir -lcapstone -lm -o $@
+
+jited_ir_stack.o: jited_ir.c
+	$(CC) $(DEPFLAGS) $(CFLAGS) $(CPPFLAGS) -DJIT_RESOLVE_STACK -c $<
+
+jited_ir_stack: jited_ir_stack.o
 	$(CC) $^ -lir -lcapstone -lm -o $@
