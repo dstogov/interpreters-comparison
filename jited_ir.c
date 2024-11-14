@@ -77,6 +77,10 @@ typedef struct _jit_ctx {
 	ir_ctx     ctx;
 	ir_ref     cpu;
 #ifdef JIT_RESOLVE_STACK
+# ifdef JIT_USE_VARS
+    int        stack_limit;
+    ir_ref    *vars;
+#endif
     int        sp;
     int       *bb_sp; /* SP value at start of basic-block */
 #endif
@@ -91,10 +95,16 @@ typedef struct _jit_ctx {
 
 static void jit_push(jit_ctx *jit, ir_ref v) {
 #ifdef JIT_RESOLVE_STACK
-    assert(jit->sp < STACK_CAPACITY - 1);
     int sp = ++jit->sp;
+# ifdef JIT_USE_VARS
+    assert(sp < jit->stack_limit);
+    // JIT: pcpu->stack[++pcpu->sp] = v;
+    ir_VSTORE(jit->vars[sp], v);
+# else
+    assert(jit->sp < STACK_CAPACITY);
     // JIT: pcpu->stack[++pcpu->sp] = v;
     ir_STORE(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)), v);
+# endif
 #else
     // JIT: if (pcpu->sp >= STACK_CAPACITY-1) {
     ir_ref sp_addr = ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp));
@@ -116,10 +126,15 @@ static void jit_push(jit_ctx *jit, ir_ref v) {
 
 static ir_ref jit_pop(jit_ctx *jit) {
 #ifdef JIT_RESOLVE_STACK
-    assert(jit->sp >= 0);
     int sp = jit->sp--;
+    assert(sp >= 0);
+# ifdef JIT_USE_VARS
+    //JIT: pcpu->stack[pcpu->sp--];
+    return ir_VLOAD_U32(jit->vars[sp]);
+# else
     //JIT: pcpu->stack[pcpu->sp--];
     return ir_LOAD_U32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack) + sp * sizeof(uint32_t)));
+# endif
 #else
     // JIT: if (pcpu->sp < 0) {
     ir_ref sp_addr = ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp));
@@ -143,6 +158,12 @@ static ir_ref jit_pop(jit_ctx *jit) {
 
 static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 #ifdef JIT_RESOLVE_STACK
+# ifdef JIT_USE_VARS
+    assert(IR_IS_CONST_REF(pos));
+    int sp = jit->ctx.ir_base[pos].val.i32;
+    assert(sp >= 0 && sp < jit->stack_limit);
+    return ir_VLOAD_U32(jit->vars[sp]);
+# else
     // JIT: if (pcpu->sp - 1 < pos) {
     ir_ref if_out = ir_IF(ir_LT(ir_CONST_U32(jit->sp - 1), pos));
 
@@ -153,6 +174,7 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
     // JIT: pcpu->stack[pcpu->sp - pos];
     return ir_LOAD_U32(ir_ADD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, stack)),
             ir_MUL_I32(ir_SUB_I32(ir_CONST_U32(jit->sp), pos), ir_CONST_I32(sizeof(uint32_t)))));
+# endif
 #else
     // JIT: if (pcpu->sp - 1 < pos) {
     ir_ref sp = ir_LOAD_I32(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, sp)));
@@ -192,17 +214,10 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     ir_START();
     jit->cpu = ir_PARAM(IR_ADDR, "cpu", 1);
 
-#ifdef JIT_RESOLVE_STACK
-    jit->sp = 0;
-    jit->bb_sp = malloc(len * sizeof(int));
-    memset(jit->bb_sp, -1, len * sizeof(int));
-#endif
-
     jit->labels = calloc(len, sizeof(jit_label));
     jit->stack_overflow = IR_UNUSED;
     jit->stack_underflow = IR_UNUSED;
     jit->stack_bound = IR_UNUSED;
-
 
     /* mark goto targets */
     for (int i=0; i < len;) {
@@ -214,8 +229,96 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
         case Instr_Jump:
             jit->labels[i + decoded.immediate].inputs++;
             break;
+        case Instr_Break:
+            i = len;
+            break;
         }
     }
+
+#ifdef JIT_RESOLVE_STACK
+    jit->sp = -1;
+    jit->bb_sp = malloc(len * sizeof(int));
+    memset(jit->bb_sp, -1, len * sizeof(int));
+
+# ifdef JIT_USE_VARS
+	/* calculate stack_limit */
+	jit->stack_limit = 0;
+    decoded.opcode = Instr_Nop;
+
+    for (int i=0; i < len;) {
+        if (jit->labels[i].inputs > 0) {
+            if (decoded.opcode != Instr_Jump) {
+                assert(jit->bb_sp[i] == -1 || jit->bb_sp[i] == jit->sp);
+                jit->bb_sp[i] = jit->sp;
+            }
+            assert(jit->bb_sp[i] != -1);
+            jit->sp == jit->bb_sp[i];
+        }
+
+        decoded = decode_at_address(prog, i);
+        i += decoded.length;
+
+        switch(decoded.opcode) {
+        case Instr_Nop:
+        case Instr_Halt:
+        case Instr_Swap:
+        case Instr_Inc:
+        case Instr_Dec:
+        case Instr_Rot:
+        case Instr_SQRT:
+        case Instr_Pick:
+            /* Do nothing */
+            break;
+        case Instr_Push:
+        case Instr_Dup:
+        case Instr_Over:
+        case Instr_Rand:
+            jit->sp++;
+            if (jit->sp >= jit->stack_limit) {
+                jit->stack_limit = jit->sp + 1;
+            }
+            break;
+        case Instr_Print:
+        case Instr_Add:
+        case Instr_Sub:
+        case Instr_Mod:
+        case Instr_Mul:
+        case Instr_Drop:
+        case Instr_And:
+        case Instr_Or:
+        case Instr_Xor:
+        case Instr_SHL:
+        case Instr_SHR:
+            jit->sp--;
+            break;
+        case Instr_JE:
+        case Instr_JNE:
+            jit->sp--;
+            assert(jit->bb_sp[i + decoded.immediate] == -1 || jit->bb_sp[i + decoded.immediate] == jit->sp);
+            jit->bb_sp[i + decoded.immediate] = jit->sp;
+            break;
+        case Instr_Jump:
+            assert(jit->bb_sp[i + decoded.immediate] == -1 || jit->bb_sp[i + decoded.immediate] == jit->sp);
+            jit->bb_sp[i + decoded.immediate] = jit->sp;
+            break;
+        case Instr_Break:
+            i = len;
+            break;
+        default:
+            assert(0 && "Unsupported instruction");
+            break;
+        }
+    }
+
+    jit->sp = -1;
+	jit->vars = malloc(jit->stack_limit * sizeof(ir_ref));
+	for (int i = 0; i < jit->stack_limit; i++) {
+	    char s[16];
+	    sprintf(s, "t%d", i);
+	    jit->vars[i] = ir_var(_ir_CTX, IR_U32, 1, s);
+	}
+# endif
+#endif
 
     ir_ref printf_func =
         ir_const_func(_ir_CTX, ir_str(_ir_CTX, "printf"), ir_proto_1(_ir_CTX, IR_I32, IR_VARARG_FUNC, IR_ADDR));
