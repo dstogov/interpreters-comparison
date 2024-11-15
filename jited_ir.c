@@ -74,8 +74,8 @@ typedef struct _jit_label {
 } jit_label;
 
 typedef struct _jit_ctx {
-	ir_ctx     ctx;
-	ir_ref     cpu;
+    ir_ctx     ctx;
+    ir_ref     cpu;
 #ifdef JIT_RESOLVE_STACK
 # ifdef JIT_USE_VARS
     int        stack_limit;
