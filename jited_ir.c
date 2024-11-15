@@ -570,15 +570,20 @@ int main(int argc, char **argv) {
     ir_init(&jit.ctx, IR_FUNCTION | IR_OPT_FOLDING | IR_OPT_CFG | IR_OPT_CODEGEN, 256, 1024);
 
     jit_program(&jit, cpu.pmem, PROGRAM_SIZE);
-    ir_save(&jit.ctx, IR_SAVE_CFG | IR_SAVE_RULES | IR_SAVE_REGS, stderr);
+
+    if (debug) {
+        ir_save(&jit.ctx, IR_SAVE_CFG | IR_SAVE_RULES | IR_SAVE_REGS, stderr);
+    }
 
     entry = (entry_t)ir_jit_compile(&jit.ctx, 2, &size);
     if (!entry) {
         printf("Compilation failure\n");
     }
 
-    ir_save(&jit.ctx, IR_SAVE_CFG | IR_SAVE_RULES | IR_SAVE_REGS, stderr);
-    ir_disasm("prog", entry, size, 0, &jit.ctx, stderr);
+    if (debug) {
+        ir_save(&jit.ctx, IR_SAVE_CFG | IR_SAVE_RULES | IR_SAVE_REGS, stderr);
+        ir_disasm("prog", entry, size, 0, &jit.ctx, stderr);
+    }
 
     entry(&cpu);
 
