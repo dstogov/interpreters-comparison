@@ -241,8 +241,8 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     memset(jit->bb_sp, -1, len * sizeof(int));
 
 # ifdef JIT_USE_VARS
-	/* calculate stack_limit */
-	jit->stack_limit = 0;
+    /* calculate stack_limit */
+    jit->stack_limit = 0;
     decoded.opcode = Instr_Nop;
 
     for (int i=0; i < len;) {
@@ -311,12 +311,12 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     }
 
     jit->sp = -1;
-	jit->vars = malloc(jit->stack_limit * sizeof(ir_ref));
-	for (int i = 0; i < jit->stack_limit; i++) {
-	    char s[16];
-	    sprintf(s, "t%d", i);
-	    jit->vars[i] = ir_var(_ir_CTX, IR_U32, 1, s);
-	}
+    jit->vars = malloc(jit->stack_limit * sizeof(ir_ref));
+    for (int i = 0; i < jit->stack_limit; i++) {
+        char s[16];
+        sprintf(s, "t%d", i);
+        jit->vars[i] = ir_var(_ir_CTX, IR_U32, 1, s);
+    }
 # endif
 #endif
 
