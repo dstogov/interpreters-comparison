@@ -746,6 +746,17 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
         ir_STORE(ir_ADD_OFFSET(jit->cpu, offsetof(cpu_t, state)), ir_CONST_I32(Cpu_Break));
         ir_RETURN(IR_VOID);
     }
+
+#ifdef JIT_RESOLVE_STACK
+# if defined(JIT_USE_SSA)
+    free(jit->ssa_vars);
+    free(jit->incomplete_phis);
+# elif defined(JIT_USE_SSA)
+    free(jit->vars);
+# endif
+    free(jit->bb_sp);
+#endif
+    free(jit->labels);
 }
 
 int main(int argc, char **argv) {
