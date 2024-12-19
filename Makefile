@@ -3,7 +3,7 @@
 #    Copyright (c) 2015, 2016 Grigory Rechistov. All rights reserved.
 #
 
-CFLAGS=-std=c11 -O2 -Wextra -Werror -gdwarf-3
+CFLAGS=-std=c11 -O0 -g -Wextra -Werror -gdwarf-3
 LDFLAGS = -lm
 
 COMMON_SRC = common.c

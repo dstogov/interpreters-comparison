@@ -71,22 +71,13 @@ static inline decode_t decode_at_address(const Instr_t* prog, uint32_t addr) {
 typedef struct _jit_label {
     ir_ref inputs; /* number of input edges */
     ir_ref merge;  /* reference of MERGE or "list" of forward inputs */
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-    int    b;
-#endif
 } jit_label;
 
 typedef struct _jit_ctx {
     ir_ctx     ctx;
     ir_ref     cpu;
 #ifdef JIT_RESOLVE_STACK
-# if defined(JIT_USE_SSA)
-    int        b;              /* current block */
-    int        blocks_count;
-    int        stack_limit;
-    ir_ref    *ssa_vars;
-    ir_ref    *incomplete_phis;
-# elif defined(JIT_USE_VARS)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     int        stack_limit;
     ir_ref    *vars;
 # endif
@@ -102,123 +93,10 @@ typedef struct _jit_ctx {
 #undef  _ir_CTX
 #define _ir_CTX    (&jit->ctx)
 
-#ifdef JIT_USE_SSA
-static ir_ref jit_ssa_get_var(jit_ctx *jit, int b, int var, ir_ref control);
-
-static ir_ref jit_ssa_try_remove_trivial_phi(jit_ctx *jit, ir_ref phi) {
-    ir_ref i, n = jit->ctx.ir_base[phi].inputs_count;
-    ir_ref same, op;
-
-    assert(n > 2);
-    same = ir_get_op(_ir_CTX, phi, 2);
-    for (i = 3; i <= n; i++) {
-        op = ir_get_op(_ir_CTX, phi, i);
-        if (op != same && op != phi) {
-            return phi;
-        }
-    }
-
-    // Remember all users except the phi itself
-    // users = phi.users.remove(phi)
-    // Reroute all uses of phi to same and remove phi
-    // phi.replaceBy(same)
-    // Try to recursively remove all phi users, which might have become trivial
-    // for use in users: f use is a Phi: tryRemoveTrivialPhi(use)
-
-    return same;
-}
-
-static void jit_ssa_set_var(jit_ctx *jit, int b, int var, ir_ref val) {
-    jit->ssa_vars[var * jit->blocks_count + b] = val;
-}
-
-static ir_ref jit_ssa_get_var(jit_ctx *jit, int b, int var, ir_ref control) {
-    ir_ref val = jit->ssa_vars[var * jit->blocks_count + b];
-    ir_ref ref;
-    ir_insn *insn;
-
-    if (val) {
-        return val;
-    }
-
-    ref = control;
-    assert(ref);
-    insn = &jit->ctx.ir_base[ref];
-
-    /* go up to the start of basic-block through control links */
-    while (insn->op < IR_START || insn->op > IR_LOOP_BEGIN) {
-        ref = insn->op1;
-        insn = &jit->ctx.ir_base[ref];
-    }
-
-    assert(insn->op != IR_START);
-    if (insn->op == IR_MERGE || insn->op == IR_LOOP_BEGIN) {
-        bool incomplete = 0;
-        uint32_t i, n = insn->inputs_count;
-        val = ir_emit_N(_ir_CTX, IR_OPT(IR_PHI, IR_U32), n + 1);
-        ir_set_op(_ir_CTX, val, 1, ref);
-        jit->ssa_vars[var * jit->blocks_count + b] = val;
-        for (i = 1; i <= n; i++) {
-            ir_ref end = ir_get_op(_ir_CTX, ref, i);
-            if (end) {
-                ir_insn *end_insn = &jit->ctx.ir_base[end];
-                assert(end_insn->op >= IR_END && end_insn->op <= IR_SWITCH);
-                assert(end_insn->op3 >= 1000);
-                ir_ref op = jit_ssa_get_var(jit, end_insn->op3 - 1000, var, end);
-                ir_set_op(_ir_CTX, val, i + 1, op);
-            } else {
-                incomplete = 1;
-            }
-        }
-        if (incomplete) {
-            jit->incomplete_phis[var * jit->blocks_count + b] = val;
-        } else {
-            val = jit_ssa_try_remove_trivial_phi(jit, val);
-        }
-    } else {
-        ir_ref end = insn->op1;
-        assert(end);
-        ir_insn *end_insn = &jit->ctx.ir_base[end];
-        assert(end_insn->op >= IR_END && end_insn->op <= IR_SWITCH);
-        assert(end_insn->op3 >= 1000);
-        val = jit_ssa_get_var(jit, end_insn->op3 - 1000, var, end);
-    }
-	jit->ssa_vars[var * jit->blocks_count + b] = val;
-	return val;
-}
-
-static void jit_ssa_fix_incomplete_phis(jit_ctx *jit, uint32_t target)
-{
-    int dst_block = jit->labels[target].b;
-    int var;
-
-    for (var = 0; var < jit->stack_limit; var++) {
-        ir_ref phi = jit->incomplete_phis[var * jit->blocks_count + dst_block];
-        if (phi) {
-            ir_ref val = jit_ssa_get_var(jit, jit->b, var, jit->ctx.control);
-            ir_set_op(_ir_CTX, phi, jit->labels[target].inputs + 2, val);
-        }
-    }
-}
-
-static void jit_ssa_end_block(jit_ctx *jit) {
-    ir_ref end = jit->ctx.insns_count - 1;
-    ir_insn *insn = &jit->ctx.ir_base[end];
-    assert(insn->op >= IR_END && insn->op <= IR_SWITCH);
-    /* Use END->op3 to store the corresponding BB index */
-    insn->op3 = 1000 + jit->b;
-}
-
-#endif
-
 static void jit_push(jit_ctx *jit, ir_ref v) {
 #ifdef JIT_RESOLVE_STACK
     int sp = ++jit->sp;
-# ifdef JIT_USE_SSA
-    assert(sp < jit->stack_limit);
-    // JIT: pcpu->stack[++pcpu->sp] = v;
-    jit_ssa_set_var(jit, jit->b, sp, v);
-# elif defined(JIT_USE_VARS)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     assert(sp < jit->stack_limit);
     // JIT: pcpu->stack[++pcpu->sp] = v;
     ir_VSTORE(jit->vars[sp], v);
@@ -250,10 +128,7 @@ static ir_ref jit_pop(jit_ctx *jit) {
 #ifdef JIT_RESOLVE_STACK
     int sp = jit->sp--;
     assert(sp >= 0);
-# ifdef JIT_USE_SSA
-    // JIT: pcpu->stack[++pcpu->sp] = v;
-    return jit_ssa_get_var(jit, jit->b, sp, jit->ctx.control);
-# elif defined(JIT_USE_VARS)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     //JIT: pcpu->stack[pcpu->sp--];
     return ir_VLOAD_U32(jit->vars[sp]);
 # else
@@ -283,12 +158,7 @@ static ir_ref jit_pop(jit_ctx *jit) {
 
 static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 #ifdef JIT_RESOLVE_STACK
-# ifdef JIT_USE_SSA
-    assert(IR_IS_CONST_REF(pos));
-    int sp = jit->ctx.ir_base[pos].val.i32;
-    assert(sp >= 0 && sp < jit->stack_limit);
-    return jit_ssa_get_var(jit, jit->b, sp, jit->ctx.control);
-# elif defined(JIT_USE_VARS)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     assert(IR_IS_CONST_REF(pos));
     int sp = jit->ctx.ir_base[pos].val.i32;
     assert(sp >= 0 && sp < jit->stack_limit);
@@ -321,16 +191,10 @@ static ir_ref jit_pick(jit_ctx *jit, ir_ref pos) {
 }
 
 static void jit_goto_backward(jit_ctx *jit, uint32_t target) {
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-    jit_ssa_fix_incomplete_phis(jit, target);
-#endif
     ir_set_op(_ir_CTX, jit->labels[target].merge, ++jit->labels[target].inputs, ir_END());
 #ifdef JIT_RESOLVE_STACK
     assert(jit->bb_sp[target] == -1 || jit->bb_sp[target] == jit->sp);
     jit->bb_sp[target] = jit->sp;
-# ifdef JIT_USE_SSA
-    jit_ssa_end_block(jit);
-# endif
 #endif
 }
 
@@ -339,9 +203,6 @@ static void jit_goto_forward(jit_ctx *jit, uint32_t target) {
 #ifdef JIT_RESOLVE_STACK
     assert(jit->bb_sp[target] == -1 || jit->bb_sp[target] == jit->sp);
     jit->bb_sp[target] = jit->sp;
-# ifdef JIT_USE_SSA
-    jit_ssa_end_block(jit);
-# endif
 #endif
 }
 
@@ -365,14 +226,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
         switch(decoded.opcode) {
         case Instr_JE:
         case Instr_JNE:
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-            if (!jit->labels[i + decoded.immediate].inputs && i + decoded.immediate != 0) {
-                jit->blocks_count++;
-            }
-            if (!jit->labels[i].inputs) {
-                jit->blocks_count++;
-            }
-#endif
             jit->labels[i + decoded.immediate].inputs++;
             jit->labels[i].inputs++;
             break;
@@ -390,15 +243,10 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     jit->bb_sp = malloc(len * sizeof(int));
     memset(jit->bb_sp, -1, len * sizeof(int));
 
-# if defined(JIT_USE_SSA) || defined(JIT_USE_VARS)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     /* calculate stack_limit */
     jit->stack_limit = 0;
     decoded.opcode = Instr_Nop;
-
-#  ifdef JIT_USE_SSA
-    jit->blocks_count = 1;
-    jit->b = 0;
-#  endif
 
     for (int i=0; i < len;) {
         if (jit->labels[i].inputs > 0) {
@@ -408,11 +256,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             }
             assert(jit->bb_sp[i] != -1);
             jit->sp == jit->bb_sp[i];
-#  ifdef JIT_USE_SSA
-            if (i != 0) {
-                jit->blocks_count++;
-            }
-#  endif
         }
 
         decoded = decode_at_address(prog, i);
@@ -471,17 +314,12 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     }
 
     jit->sp = -1;
-#  ifdef JIT_USE_SSA
-    jit->ssa_vars = calloc(jit->stack_limit * jit->blocks_count, sizeof(ir_ref));
-    jit->incomplete_phis = calloc(jit->stack_limit * jit->blocks_count, sizeof(ir_ref));
-#  else
     jit->vars = malloc(jit->stack_limit * sizeof(ir_ref));
     for (int i = 0; i < jit->stack_limit; i++) {
         char s[16];
         sprintf(s, "t%d", i);
         jit->vars[i] = ir_var(_ir_CTX, IR_U32, 1, s);
     }
-#  endif
 # endif
 #endif
 
@@ -534,12 +372,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
 #ifdef JIT_RESOLVE_STACK
             assert(jit->bb_sp[i] != -1);
             jit->sp == jit->bb_sp[i];
-# ifdef JIT_USE_SSA
-            if (i != 0) {
-                jit->b++;
-            }
-            jit->labels[i].b = jit->b;
-# endif
 #endif
         }
 
@@ -599,9 +431,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             tmp2 = jit_pop(jit);
             // JIT if (tmp2 == 0)
             tmp3 = ir_IF(ir_EQ(tmp2, ir_CONST_U32(0)));
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-            jit_ssa_end_block(jit);
-#endif
             ir_IF_TRUE_cold(tmp3);
             // JIT: printf("Division by zero\n");
             ir_CALL_1(IR_VOID, printf_func, ir_CONST_STR("Division by zero\n"));
@@ -632,9 +461,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             tmp1 = jit_pop(jit);
             // JIT: if (tmp1 == 0)
             tmp3 = ir_IF(ir_EQ(tmp1, ir_CONST_U32(0)));
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-            jit_ssa_end_block(jit);
-#endif
             ir_IF_TRUE(tmp3);
             if (decoded.immediate >= 0) {
                 jit_goto_forward(jit, i + decoded.immediate);
@@ -647,9 +473,6 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
             tmp1 = jit_pop(jit);
             // JIT: if (tmp1 == 0)
             tmp3 = ir_IF(ir_NE(tmp1, ir_CONST_U32(0)));
-#if defined(JIT_RESOLVE_STACK) && defined(JIT_USE_SSA)
-            jit_ssa_end_block(jit);
-#endif
             ir_IF_TRUE(tmp3);
             if (decoded.immediate >= 0) {
                 jit_goto_forward(jit, i + decoded.immediate);
@@ -748,10 +571,7 @@ static void jit_program(jit_ctx *jit, const Instr_t *prog, int len) {
     }
 
 #ifdef JIT_RESOLVE_STACK
-# if defined(JIT_USE_SSA)
-    free(jit->ssa_vars);
-    free(jit->incomplete_phis);
-# elif defined(JIT_USE_SSA)
+# if defined(JIT_USE_VARS) || defined(JIT_USE_SSA)
     free(jit->vars);
 # endif
     free(jit->bb_sp);
@@ -766,8 +586,12 @@ int main(int argc, char **argv) {
     typedef void (*entry_t)(cpu_t*);
     entry_t entry;
     size_t size;
+    uint32_t flags = IR_FUNCTION | IR_OPT_FOLDING | IR_OPT_CFG | IR_OPT_CODEGEN;
 
-    ir_init(&jit.ctx, IR_FUNCTION | IR_OPT_FOLDING | IR_OPT_CFG | IR_OPT_CODEGEN, 256, 1024);
+#if defined(JIT_RESOLVE_STACK) &&  defined(JIT_USE_SSA)
+	flags |= IR_OPT_MEM2SSA;
+#endif
+    ir_init(&jit.ctx, flags, 256, 1024);
 
     jit_program(&jit, cpu.pmem, PROGRAM_SIZE);
 
@@ -778,6 +602,7 @@ int main(int argc, char **argv) {
     entry = (entry_t)ir_jit_compile(&jit.ctx, 2, &size);
     if (!entry) {
         printf("Compilation failure\n");
+        exit(-1);
     }
 
     if (debug) {
